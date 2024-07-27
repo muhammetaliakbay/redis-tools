@@ -35,7 +35,7 @@ func TestLockerTryLock(t *testing.T) {
 	expiration := time.Second * 2
 
 	// lock should be claimed when it is free
-	lockA, err := locker.TryLock(ctx, key, expiration)
+	lockA, _, err := locker.TryLock(ctx, key, expiration)
 	require.NoError(t, err)
 	require.NotNil(t, lockA)
 
@@ -46,7 +46,7 @@ func TestLockerTryLock(t *testing.T) {
 	<-halfExpiryTimer.C
 
 	// another lock should not be claimed
-	lockB, err := locker.TryLock(ctx, key, expiration)
+	lockB, _, err := locker.TryLock(ctx, key, expiration)
 	require.ErrorIs(t, err, redistools.ErrUnclaimed)
 	require.Nil(t, lockB)
 
@@ -70,7 +70,7 @@ func TestLockerReset(t *testing.T) {
 	expiration := time.Second * 2
 
 	// lock should be claimed when it is free
-	lockA, err := locker.TryLock(ctx, key, expiration)
+	lockA, _, err := locker.TryLock(ctx, key, expiration)
 	require.NoError(t, err)
 	require.NotNil(t, lockA)
 
@@ -121,7 +121,7 @@ func TestLockerRelease(t *testing.T) {
 	expiration := time.Second * 2
 
 	// lock should be claimed when it is free
-	lockA, err := locker.TryLock(ctx, key, expiration)
+	lockA, _, err := locker.TryLock(ctx, key, expiration)
 	require.NoError(t, err)
 	require.NotNil(t, lockA)
 
@@ -134,15 +134,49 @@ func TestLockerRelease(t *testing.T) {
 	require.ErrorIs(t, err, redistools.ErrUnclaimed)
 }
 
-func TestLockerLock(t *testing.T) {
+func TestLockerLockAtExpiry(t *testing.T) {
 	client := testClient()
 	locker := redistools.NewLocker(client)
 	ctx := context.Background()
 	key := randomString()
 	expiration := time.Second * 2
+	tolerance := time.Millisecond * 100
 
 	// lock should be claimed when it is free
-	lockA, err := locker.TryLock(ctx, key, expiration)
+	lockA, _, err := locker.TryLock(ctx, key, expiration)
+	lockATime := time.Now()
+	require.NoError(t, err)
+	require.NotNil(t, lockA)
+
+	lockB, err := locker.Lock(ctx, key, expiration)
+	lockBTime := time.Now()
+	require.WithinRange(t, lockBTime, lockATime.Add(expiration), lockATime.Add(expiration).Add(tolerance))
+	require.NoError(t, err)
+	require.NotNil(t, lockB)
+
+	// lock should be claimed
+	err = lockB.Check(ctx)
+	require.NoError(t, err)
+
+	// old lock should be unclaimed
+	err = lockA.Check(ctx)
+	require.ErrorIs(t, err, redistools.ErrUnclaimed)
+
+	// release the lock
+	err = lockB.Release(ctx)
+	require.NoError(t, err)
+}
+
+func TestLockerLockAtRelease(t *testing.T) {
+	client := testClient()
+	locker := redistools.NewLocker(client)
+	ctx := context.Background()
+	key := randomString()
+	expiration := time.Second * 2
+	tolerance := time.Millisecond * 100
+
+	// lock should be claimed when it is free
+	lockA, _, err := locker.TryLock(ctx, key, expiration)
 	require.NoError(t, err)
 	require.NotNil(t, lockA)
 
@@ -156,7 +190,7 @@ func TestLockerLock(t *testing.T) {
 
 	lockB, err := locker.Lock(ctx, key, expiration)
 	lockTime := time.Now()
-	require.WithinRange(t, lockTime, releaseTime, releaseTime.Add(time.Millisecond*100))
+	require.WithinRange(t, lockTime, releaseTime, releaseTime.Add(tolerance))
 	require.NoError(t, err)
 	require.NotNil(t, lockB)
 
@@ -181,7 +215,7 @@ func TestLockerWithin(t *testing.T) {
 	expiration := time.Second * 2
 
 	// lock should be claimed when it is free
-	lockA, err := locker.TryLock(ctx, key, expiration)
+	lockA, _, err := locker.TryLock(ctx, key, expiration)
 	require.NoError(t, err)
 	require.NotNil(t, lockA)
 

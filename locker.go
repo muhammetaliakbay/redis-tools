@@ -30,10 +30,17 @@ func (l *Locker) TryLock(
 	ctx context.Context,
 	key string,
 	expiration time.Duration,
-) (*Lock, error) {
+) (*Lock, time.Duration, error) {
 	var claim string
+	var remaining time.Duration
 	err := l.client.Watch(ctx, func(tx *redis.Tx) error {
-		owner := tx.Get(ctx, key)
+		pipe := tx.TxPipeline()
+		owner := pipe.Get(ctx, key)
+		ttl := pipe.TTL(ctx, key)
+		pipe.Exec(ctx)
+
+		remaining = ttl.Val()
+
 		if owner.Err() == nil {
 			return ErrUnclaimed
 		}
@@ -41,23 +48,23 @@ func (l *Locker) TryLock(
 			return owner.Err()
 		}
 		claim = randomClaim()
-		pipe := tx.TxPipeline()
+		pipe = tx.TxPipeline()
 		pipe.Set(ctx, key, claim, expiration)
 		pipe.Publish(ctx, key, claim)
 		_, err := pipe.Exec(ctx)
 		return err
 	}, key)
 	if errors.Is(err, redis.TxFailedErr) {
-		return nil, ErrUnclaimed
+		return nil, remaining, ErrUnclaimed
 	}
 	if err != nil {
-		return nil, err
+		return nil, remaining, err
 	}
 	return &Lock{
 		locker: l,
 		key:    key,
 		claim:  claim,
-	}, nil
+	}, remaining, nil
 }
 
 func (l *Locker) Lock(
@@ -65,14 +72,27 @@ func (l *Locker) Lock(
 	key string,
 	expiration time.Duration,
 ) (*Lock, error) {
+	var timer *time.Timer
 	var pubsub *redis.PubSub
-	ticker := time.NewTicker(LOCK_RETRY_PERIOD)
-	defer ticker.Stop()
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	for {
-		lock, err := l.TryLock(ctx, key, expiration)
+		lock, remaining, err := l.TryLock(ctx, key, expiration)
 		if !errors.Is(err, ErrUnclaimed) {
 			return lock, err
 		}
+
+		if remaining <= 0 || remaining > WATCH_PERIOD {
+			remaining = WATCH_PERIOD
+		}
+
+		if timer != nil {
+			timer.Stop()
+		}
+		timer = time.NewTimer(remaining)
 
 		if pubsub == nil {
 			pubsub = l.client.Subscribe(ctx, key)
@@ -80,10 +100,11 @@ func (l *Locker) Lock(
 		}
 
 		select {
-		case <-ticker.C:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
 		case <-pubsub.ChannelWithSubscriptions():
 		}
-
 	}
 }
 
